@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <!--jQuery-->
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+  <!--uuid CDN-->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/uuid/8.1.0/uuidv1.min.js"></script>
+  <script>
+    const tombstone = '&zwj;'
+    state = {
+      vertex: [{
+        uuid: 0,
+        character: tombstone
+      }],
+      edge: []
+    }
+    uuid_list = []
+
+
+    let ws = new WebSocket('ws://localhost:5001')
+    ws.onopen = () => {
+      console.log('open connection')
+    }
+    ws.onclose = () => {
+      console.log('close connection')
+    }
+    ws.onmessage = event => {
+      if (event.data == 'new join') {
+        console.log(event.data)
+        boardcast()
+      } else {
+        recieved = JSON.parse(event.data)
+        console.log('recieved state', recieved)
+        mergeState(recieved)
+      }
+    }
+
+    function reconnect(){
+      ws = new WebSocket('ws://localhost:5000')
+      ws.onopen = () => {
+        console.log('open connection')
+      }
+      ws.onclose = () => {
+        console.log('close connection')
+      }
+      ws.onmessage = event => {
+        if (event.data == 'new join') {
+          console.log(event.data)
+          boardcast()
+        } else {
+          recieved = JSON.parse(event.data)
+          console.log('recieved state', recieved)
+          mergeState(recieved)
+        }
+      }
+    }
+
+
+    $(document).ready(function() {
+      render()
+    });
+
+    function render() {
+      //render the text from state
+      console.log(state)
+      temp = genTextfromState()
+      $('textarea').html('&zwj;' + temp.text)
+      uuid_list = [0].concat(temp.uuid)
+      console.log('render', {
+        uuid: uuid_list,
+        text: $('textarea').val()
+      })
+    }
+
+    //sort by timestamp
+    function v1UuidCompare(a, b) {
+      a = a.to.replace(/^(.{8})-(.{4})-(.{4})/, '$3-$2-$1');
+      b = b.to.replace(/^(.{8})-(.{4})-(.{4})/, '$3-$2-$1');
+      return -(a < b ? -1 : (a > b ? 1 : 0));
+    }
+
+    function genTextfromState(uuid = 0) {
+      let text_front = ''
+      let uuid_front = []
+      //next connected character(s)
+      let connected = state.edge.filter(x => x.from == uuid).sort(v1UuidCompare)
+
+
+      for (let i = 0; i < connected.length; i++) {
+        //character connected to current uuid
+        let next_item = state.vertex.filter(x => x.uuid == connected[i].to)[0]
+        text_front += next_item.character
+        uuid_front.push(next_item.uuid)
+        //recursively get the string after the connected characters
+        let string_after = genTextfromState(connected[i].to)
+        text_front += string_after.text
+        uuid_front = uuid_front.concat(string_after.uuid)
+      }
+
+      return {
+        text: text_front,
+        uuid: uuid_front
+      }
+    }
+
+    //handle insertion
+    function insert(e) {
+      event.preventDefault();
+      let content = document.getElementById('text');
+
+      if ((content.selectionStart != null) && (content.selectionStart != undefined)) {
+        //capture current cursor position
+        var position = content.selectionStart == 0 ? 1 : content.selectionStart;
+        //add new vertex and edge
+        let uuid = uuidv1()
+        state.vertex.push({
+          uuid: uuid,
+          character: e.key == 'Enter' ? '\n' : e.key
+        })
+        state.edge.push({
+          from: uuid_list[position - 1],
+          to: uuid
+        })
+        console.log('!!', position)
+        console.log($('textarea').val())
+        console.log("front " + $('textarea').val()[position - 1] + "\nback " + $('textarea').val()[position])
+      }
+
+      render()
+      boardcast()
+      $('textarea').prop('selectionStart', position + 1);
+    }
+
+    //handle delection
+    function backspace(e) {
+      //only handle backsapce
+      if (e.key != 'Backspace') {
+        return false
+      } else {
+        event.preventDefault();
+      }
+
+      var content = document.getElementById('text');
+      if ((content.selectionStart != null) && (content.selectionStart != undefined)) {
+        //capture cursor position
+        var position = content.selectionStart == 0 ? 1 : content.selectionStart;
+        //find previous non-tombstone item
+        objIndex = state.vertex.findIndex((obj => obj.uuid == uuid_list[position - 1]));
+        for (let count = 0; state.vertex[objIndex].character == tombstone; ++count) {
+          objIndex = state.vertex.findIndex((obj => obj.uuid == uuid_list[position - 1 - count]));
+        }
+        console.log(position)
+        //set it to tombstone
+        state.vertex[objIndex].character = tombstone
+      } else {
+        return False
+      }
+
+      render()
+      boardcast()
+      $('textarea').prop('selectionStart', position);
+    }
+
+    function boardcast() {
+      ws.send(JSON.stringify(state))
+    }
+
+    function compareTombstone(a, b) {
+      if (a.character == tombstone && b.character != tombstone) {
+        return -1;
+      }
+      if (a.character != tombstone && b.character == tombstone) {
+        return 1;
+      }
+      return 0;
+    }
+
+    function mergeState(recievedState) {
+      //union of edge
+      state.edge = state.edge.concat(recievedState.edge).filter((i, index, self) =>
+        index === self.findIndex((j) => (
+          j.from === i.from && j.to === i.to
+        ))
+      )
+
+      //sort vertex by tombstone
+      state.vertex = state.vertex.concat(recievedState.vertex).sort(compareTombstone)
+      //union of vertices
+      state.vertex = state.vertex.filter(function(o) {
+        return this.has(o.uuid) ? false : this.add(o.uuid);
+      }, new Set());
+
+      //reset cursor
+      let content = document.getElementById('text');
+      if ((content.selectionStart != null) && (content.selectionStart != undefined)) {
+        //calculate new cursor location
+        var position = content.selectionStart == 0 ? 1 : content.selectionStart;
+        var uuid_cursor = uuid_list[position - 1]
+        render()
+        position = uuid_list.indexOf(uuid_cursor)
+        $('textarea').prop('selectionStart', position + 1)
+      } else {
+        render()
+      }
+    }
+
+    connection=1
+    connections=[]
+    function add_peer(ip){
+      let ws = new WebSocket('ws://'+ip)
+      ws.onopen = () => {
+          connections.push(ws)
+        $("ul").append(`<li id=\'${connection}\'>${ip}</li>`);
+      }
+      ws.onclose = () => {
+        $(`#${connection}`).remove();
+      }
+      ws.onmessage = event => {
+        if (event.data == 'new join') {
+          //console.log(event.data)
+          //boardcast()
+        } else {
+          recieved = JSON.parse(event.data)
+          console.log('recieved state', recieved)
+          mergeState(recieved)
+        }
+      }
+
+    }
+  </script>
+</head>
+
+<body>
+  <textarea id='text' onkeypress="insert(event)" onkeyDown="backspace(event)" style="float:left;width:500px;height:500px;">
+  </textarea>
+  <p>clients in the network</p>
+  <ul></ul>
+</body>
+
+</html>
